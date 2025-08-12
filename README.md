@@ -13,14 +13,15 @@ See the preprint at ChemRxiv: https://chemrxiv.org/engage/chemrxiv/article-detai
 
 Place the `gxtb` binary in a directory belonging to your `$PATH` variable (e.g., `$USER/bin/`).
 
-Place the following parameter and basis files into your home directory (`~/`):
-- `.gxtb` — parameter file
-- `.eeq` — electronegativity equilibration parameters
-- `.basisq` — atom-in-molecule AO basis
+Place the following parameter and basis files into a dedicated directory, which you export in the `$GXTBHOME` variable: 
+- `.gxtb` — parameter file (`-p`)
+- `.eeq` — electronegativity equilibration parameters (`-e`)
+- `.basisq` — atom-in-molecule AO basis (`-b`)
+If `$GXTBHOME` is not defined, the `gxtb` binary searches first in your home directory `$HOME` and then in the current directory (`./`). You can overwrite the location of the parameter files with the resepctive command-line flags (`-p`, `-e`, and `-b`). 
 
 ## Usage
 
-By default, `gxtb` expects a coordinate file in TURBOMOLE format.
+By default, `gxtb` expects a coordinate file in TURBOMOLE format (`coord`) using atomic units (i.e. Bohr). 
 
 ### Run examples
 
