@@ -664,9 +664,7 @@ def main(argv: Optional[list] = None) -> int:
             try:
                 import matplotlib.pyplot as plt
                 import matplotlib as mpl
-                from rdkit import RDLogger
-
-                RDLogger.DisableLog("rdApp.*")
+                import numpy as np
             except ImportError:
                 print(
                     "matplotlib not available; skipping free energy plot.",
@@ -685,16 +683,50 @@ def main(argv: Optional[list] = None) -> int:
                 mpl.rcParams['ytick.direction'] = 'out'
                 mpl.rcParams['figure.dpi'] = 300
                 mpl.rcParams['savefig.bbox'] = 'tight'
-                
-                # Use a style context if available, otherwise just use our rcParams
-                try:
-                    plt.style.use("seaborn-v0_8-whitegrid")
-                except Exception:
-                    # Fallback to default if style not found
-                    pass
 
-                fig, ax = plt.subplots(figsize=(5, 3.5))
-                ax.plot(centers, freeE, "-k", lw=2)
+                # Prepare smoothed free energy curve via spline (if SciPy available)
+                centers_arr = np.array(centers, dtype=float)
+                freeE_arr = np.array(freeE, dtype=float)
+                mask_finite = np.isfinite(freeE_arr)
+                x_base = centers_arr[mask_finite]
+                y_base = freeE_arr[mask_finite]
+                if x_base.size >= 2:
+                    x_dense = np.linspace(x_base.min(), x_base.max(), 400)
+                    try:
+                        from scipy.interpolate import UnivariateSpline
+                    except ImportError:
+                        # Fallback: linear interpolation
+                        y_smooth = np.interp(x_dense, x_base, y_base)
+                    else:
+                        # Smoothing parameter heuristic scaled by number of points
+                        s = max(len(x_base) * (0.1 ** 2), 1e-8)
+                        spline = UnivariateSpline(x_base, y_base, s=s)
+                        y_smooth = spline(x_dense)
+                else:
+                    x_dense = centers_arr
+                    y_smooth = freeE_arr
+
+                fig, axF = plt.subplots(figsize=(5, 3.5))
+
+                # Histogram on secondary axis (probabilities)
+                axP = axF.twinx()
+                bar_width = bw * 0.9
+                axP.bar(
+                    centers_arr,
+                    bin_probs,
+                    width=bar_width,
+                    color="0.85",
+                    edgecolor="none",
+                    alpha=0.8,
+                    align="center",
+                )
+                axP.set_ylabel("Probability", fontsize=10)
+                axP.tick_params(axis="y", labelsize=9)
+                if max(bin_probs) > 0.0:
+                    axP.set_ylim(0.0, max(bin_probs) * 1.1)
+
+                # Smoothed free energy curve
+                axF.plot(x_dense, y_smooth, "-k", lw=2)
 
                 # Mark reference value on the CV axis, if available.
                 ref_x: Optional[float] = None
@@ -725,21 +757,21 @@ def main(argv: Optional[list] = None) -> int:
                             break
 
                 if ref_x is not None:
-                    ax.axvline(ref_x, color="red", linestyle="--", linewidth=1.5, label="structural ref")
+                    axF.axvline(ref_x, color="red", linestyle="--", linewidth=1.5, label="structural ref")
                 if ref_cv_from_index is not None and (ref_x is None or abs(ref_cv_from_index - ref_x) > 1e-6):
-                    ax.axvline(ref_cv_from_index, color="blue", linestyle=":", linewidth=1.5, label="ref_index")
+                    axF.axvline(ref_cv_from_index, color="blue", linestyle=":", linewidth=1.5, label="ref_index")
                 if (ref_x is not None) or (ref_cv_from_index is not None):
-                    ax.legend(frameon=False, fontsize=9)
+                    axF.legend(frameon=False, fontsize=9, loc="best")
 
-                ax.set_xlabel(cv_col, fontsize=12, fontweight="bold")
-                ax.set_ylabel("Free energy (kcal/mol)", fontsize=12, fontweight="bold")
-                ax.set_title(f"1D FES along {cv_col}\n(T = {args.temperature:.1f} K)", fontsize=13)
+                axF.set_xlabel(cv_col, fontsize=12, fontweight="bold")
+                axF.set_ylabel("Free energy (kcal/mol)", fontsize=12, fontweight="bold")
+                axF.set_title(f"1D FES along {cv_col}\n(T = {args.temperature:.1f} K)", fontsize=13)
 
                 # Improve tick labels
-                ax.tick_params(axis="both", which="major", labelsize=10)
+                axF.tick_params(axis="both", which="major", labelsize=10)
 
                 # Add grid but make it subtle
-                ax.grid(True, linestyle=":", alpha=0.6)
+                axF.grid(True, linestyle=":", alpha=0.6)
 
                 fig.tight_layout()
                 plot_path = profile_path.with_suffix(".png")
