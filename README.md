@@ -4,7 +4,7 @@ This is a preliminary version of g-xTB, a general-purpose semiempirical quantum 
 
 ## 📄 Preprint
 
-See the preprint at ChemRxiv: https://chemrxiv.org/engage/chemrxiv/article-details/685434533ba0887c335fc974
+See the preprint at ChemRxiv: [g-xTB: A General-Purpose Extended Tight-Binding Electronic Structure Method For the Elements H to Lr (Z=1–103)](https://chemrxiv.org/engage/chemrxiv/article-details/685434533ba0887c335fc974)
 
 ## 📦 Installation
 
@@ -61,6 +61,86 @@ xtb coord --driver "gxtb -grad -c xtbdriver.coord" --opt
 ```
 
 💡 You may use `--opt loose` for faster convergence, as there is currently no analytical nuclear gradient — gradients are evaluated numerically and can be noisy.
+
+## 🧪 Batch conformer optimization + g-xTB energies (script)
+
+If you have a multi-conformer SDF (e.g. 20k conformers of the same molecule) and want
+**optimized geometries** plus **final g-xTB energies**, use:
+
+`scripts/gxtb_optimize_conformers.py`
+
+### Recommended workflow for large conformer sets
+
+For very large batches, the recommended approach is:
+
+- **Geometry optimization**: `xtb` using **GFN2-xTB** (fast, analytical gradients)
+- **Final energy**: `gxtb` using **g-xTB** (this repository) as a **single-point** on the optimized geometry
+
+This corresponds to `--mode xtb_opt_gxtb_sp`.
+
+### What method produced which energies?
+
+Per conformer directory `conf_XXXXX/`:
+
+- **`xtb_opt.out`**: output of `xtb input.xyz --opt ...`
+  - **Method**: GFN2-xTB (xtb)
+  - **Energy units**: Hartree (Eh), shown in the `TOTAL ENERGY ... Eh` line
+- **`xtbopt.xyz`**: optimized geometry from xtb
+  - **Coordinate units**: Å (XYZ convention)
+- **`gxtb_sp.out`**: output of `gxtb -c xtbopt.xyz ...`
+  - **Method**: g-xTB (gxtb)
+  - **Energy units**: Hartree (Eh), shown in the `total ...` line
+- **`energy`**: energy file written by gxtb
+  - Contains an `$energy` block; the **second column** is the total energy in **Eh**
+
+The top-level summary file:
+
+- **`energies.csv`**: columns `index,energy_Eh,status`
+  - **`energy_Eh`** is the **g-xTB total energy** (from gxtb), in **Hartree (Eh)**
+
+### Why are gxtb absolute energies so different from xtb energies?
+
+This is expected. **Do not compare absolute energies between `xtb` (GFN2-xTB) and `gxtb` (g-xTB).**
+
+- `xtb` (GFN2-xTB) uses its own semiempirical energy definition (valence-only framework), so its
+  printed **TOTAL ENERGY** has a method-specific absolute reference.
+- `gxtb` (g-xTB) prints a **DFT-like total energy scale** and includes large **per-atom core energy increments**
+  (see the `atomic core increments` line in `gxtb_sp.out`). This shifts the absolute energy by a large
+  (mostly constant-for-stoichiometry) amount.
+
+For conformer ranking you should use **relative energies within the same method**:
+
+- Use `energies.csv` (g-xTB) and compute \(\Delta E\) relative to the minimum.
+- Optionally also compute \(\Delta E\) from `xtb_opt.out` (GFN2-xTB), but those \(\Delta E\) values are from a different method.
+
+### Unit conversions (from Hartree)
+
+- 1 Eh = 2625.49962 kJ/mol
+- 1 Eh = 627.509474 kcal/mol
+- 1 Eh = 27.211386 eV
+
+### Charge and spin
+
+The script writes `.CHRG` per conformer (by default from the SDF formal charge; or use `--charge` to force),
+and optionally `.UHF` (use `--uhf`). This matches the control file conventions described above.
+
+### Modes
+
+- **`--mode xtb_opt_gxtb_sp` (recommended)**: optimize with xtb (GFN2-xTB), then gxtb single-point
+- **`--mode gxtb_opt`**: optimize with xtb using gxtb as a numerical-gradient driver (slow/fragile; useful for refining a small subset)
+- **`--mode gxtb_sp`**: gxtb single-point on the input geometry (no optimization)
+
+### Example
+
+```bash
+export GXTBHOME=/path/to/g-xtb/parameters
+
+python scripts/gxtb_optimize_conformers.py conformers.sdf \
+  --mode xtb_opt_gxtb_sp \
+  --xtb-opt-level loose \
+  --workers 32 \
+  --outdir gxtb_runs
+```
 
 ### Numerical Hessian
 
