@@ -55,6 +55,9 @@ from typing import List, Tuple, Optional, Dict
 from rdkit import Chem
 from rdkit.Chem import rdMolAlign, rdMolTransforms
 
+from rdkit import RDLogger
+RDLogger.DisableLog("rdApp.*")
+
 K_B_KCAL_PER_MOL_K = 0.00198720425864083  # kcal/mol/K
 HARTREE_TO_KCAL = 627.509474
 
@@ -333,6 +336,11 @@ def main(argv: Optional[list] = None) -> int:
         "--no-plot",
         action="store_true",
         help="Disable plotting of the 1D free energy profile.",
+    )
+    parser.add_argument(
+        "--output",
+        default=None,
+        help="Optional path for output CSV (default: conformer_free_energies.csv next to energies.csv).",
     )
 
     args = parser.parse_args(argv)
