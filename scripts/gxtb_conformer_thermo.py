@@ -55,9 +55,6 @@ from typing import List, Tuple, Optional, Dict
 from rdkit import Chem
 from rdkit.Chem import rdMolAlign, rdMolTransforms
 
-from rdkit import RDLogger
-RDLogger.DisableLog("rdApp.*")
-
 K_B_KCAL_PER_MOL_K = 0.00198720425864083  # kcal/mol/K
 HARTREE_TO_KCAL = 627.509474
 
@@ -314,6 +311,12 @@ def main(argv: Optional[list] = None) -> int:
              "'rmsd' if available, else 'dE_rel_min_kcal'.",
     )
     parser.add_argument(
+        "--cv-column2",
+        default=None,
+        help="Optional second column for 2D free energy surfaces. If provided, "
+             "generates 2D FES(cv1, cv2) plots.",
+    )
+    parser.add_argument(
         "--bin-width",
         type=float,
         default=None,
@@ -321,14 +324,15 @@ def main(argv: Optional[list] = None) -> int:
              "chosen --cv-column. If omitted, a heuristic default is chosen.",
     )
     parser.add_argument(
+        "--bin-width2",
+        type=float,
+        default=None,
+        help="Bin width for second dimension in 2D plots. Defaults to --bin-width if omitted.",
+    )
+    parser.add_argument(
         "--no-plot",
         action="store_true",
         help="Disable plotting of the 1D free energy profile.",
-    )
-    parser.add_argument(
-        "--output",
-        default=None,
-        help="Optional path for output CSV (default: conformer_free_energies.csv next to energies.csv).",
     )
 
     args = parser.parse_args(argv)
@@ -423,11 +427,6 @@ def main(argv: Optional[list] = None) -> int:
         pn_lambda=pn_lambda,
     )
 
-    if args.output:
-        out_path = Path(args.output).resolve()
-    else:
-        out_path = csv_path.parent / "conformer_free_energies.csv"
-
     # Optional torsion analysis based on SDF and user-provided atom indices.
     torsion_defs: List[Tuple[int, int, int, int]] = []
     if args.torsion:
@@ -500,7 +499,6 @@ def main(argv: Optional[list] = None) -> int:
                 row[f"d_torsion{j}_deg"] = d
             row["torsion_dist"] = torsion_dist
 
-    # Determine default CV column and bin width for 1D free energy profile.
     # Decide which CV columns to generate profiles for:
     # - if --cv-column is given: just that one
     # - else: automatically scan per_conf rows for distance-like and CV-like columns.
@@ -555,6 +553,11 @@ def main(argv: Optional[list] = None) -> int:
         fieldnames.append("torsion_dist")
     if args.ref_index is not None:
         fieldnames.append("dG_vs_ref_kcal")
+
+    if args.output:
+        out_path = Path(args.output).resolve()
+    else:
+        out_path = csv_path.parent / "conformer_free_energies.csv"
 
     with out_path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -630,10 +633,11 @@ def main(argv: Optional[list] = None) -> int:
             f"(bin_width={bw})"
         )
 
-        # Optional plotting.
+        # Optional plotting (1D).
         if not args.no_plot:
             try:
                 import matplotlib.pyplot as plt
+                import matplotlib as mpl
                 from rdkit import RDLogger
 
                 RDLogger.DisableLog("rdApp.*")
@@ -643,16 +647,177 @@ def main(argv: Optional[list] = None) -> int:
                     file=sys.stderr,
                 )
             else:
-                plt.style.use("seaborn-v0_8-whitegrid")
+                # Publication-quality style settings
+                mpl.rcParams['font.family'] = 'sans-serif'
+                mpl.rcParams['font.sans-serif'] = ['Arial', 'Helvetica', 'DejaVu Sans']
+                mpl.rcParams['font.size'] = 12
+                mpl.rcParams['axes.linewidth'] = 1.5
+                mpl.rcParams['lines.linewidth'] = 2.0
+                mpl.rcParams['xtick.major.width'] = 1.5
+                mpl.rcParams['ytick.major.width'] = 1.5
+                mpl.rcParams['xtick.direction'] = 'out'
+                mpl.rcParams['ytick.direction'] = 'out'
+                mpl.rcParams['figure.dpi'] = 300
+                mpl.rcParams['savefig.bbox'] = 'tight'
+                
+                # Use a style context if available, otherwise just use our rcParams
+                try:
+                    plt.style.use("seaborn-v0_8-whitegrid")
+                except Exception:
+                    # Fallback to default if style not found
+                    pass
+
                 fig, ax = plt.subplots(figsize=(5, 3.5))
                 ax.plot(centers, freeE, "-k", lw=2)
-                ax.set_xlabel(cv_col)
-                ax.set_ylabel("Free energy (kcal/mol)")
-                ax.set_title(f"1D free energy profile (T = {args.temperature:.1f} K)")
+                ax.set_xlabel(cv_col, fontsize=12, fontweight='bold')
+                ax.set_ylabel("Free energy (kcal/mol)", fontsize=12, fontweight='bold')
+                ax.set_title(f"1D FES along {cv_col}\n(T = {args.temperature:.1f} K)", fontsize=13)
+                
+                # Improve tick labels
+                ax.tick_params(axis='both', which='major', labelsize=10)
+                
+                # Add grid but make it subtle
+                ax.grid(True, linestyle=':', alpha=0.6)
+
                 fig.tight_layout()
                 plot_path = profile_path.with_suffix(".png")
                 fig.savefig(plot_path, dpi=300, bbox_inches="tight")
                 plt.close(fig)
+
+    # 2D Free Energy Surface (if requested)
+    if args.cv_column and args.cv_column2:
+        cv1 = args.cv_column
+        cv2 = args.cv_column2
+        
+        cv1_vals = []
+        cv2_vals = []
+        wts = []
+        
+        for row in per_conf:
+            v1 = row.get(cv1)
+            v2 = row.get(cv2)
+            if v1 is None or v2 is None:
+                continue
+            try:
+                v1_f = float(v1)
+                v2_f = float(v2)
+            except (TypeError, ValueError):
+                continue
+            cv1_vals.append(v1_f)
+            cv2_vals.append(v2_f)
+            wts.append(float(row.get("prob", 0.0)))
+
+        if cv1_vals and sum(wts) > 0.0:
+            bw1 = default_bin_width(cv1)
+            bw2 = args.bin_width2 if args.bin_width2 is not None else default_bin_width(cv2)
+            
+            min1, max1 = min(cv1_vals), max(cv1_vals)
+            min2, max2 = min(cv2_vals), max(cv2_vals)
+            
+            nbins1 = max(1, int(math.ceil((max1 - min1) / bw1)))
+            nbins2 = max(1, int(math.ceil((max2 - min2) / bw2)))
+            
+            # Create 2D histogram
+            # bin_counts[i][j] where i is index for cv1, j for cv2
+            bin_counts_2d = [[0.0 for _ in range(nbins2)] for _ in range(nbins1)]
+            
+            for v1, v2, w in zip(cv1_vals, cv2_vals, wts):
+                i = int((v1 - min1) / bw1)
+                j = int((v2 - min2) / bw2)
+                
+                # Clamp indices
+                i = max(0, min(i, nbins1 - 1))
+                j = max(0, min(j, nbins2 - 1))
+                
+                bin_counts_2d[i][j] += w
+                
+            total_w = sum(sum(row) for row in bin_counts_2d)
+            
+            if total_w > 0.0:
+                # Prepare grid for plotting/saving
+                x_centers = [min1 + (i + 0.5) * bw1 for i in range(nbins1)]
+                y_centers = [min2 + (j + 0.5) * bw2 for j in range(nbins2)]
+                
+                # Compute FES grid
+                fes_grid = []
+                min_f = float('inf')
+                
+                kT = K_B_KCAL_PER_MOL_K * args.temperature
+                
+                for i in range(nbins1):
+                    row_f = []
+                    for j in range(nbins2):
+                        p = bin_counts_2d[i][j] / total_w
+                        if p > 0:
+                            f = -kT * math.log(p)
+                            if f < min_f:
+                                min_f = f
+                            row_f.append(f)
+                        else:
+                            row_f.append(float('inf'))
+                    fes_grid.append(row_f)
+                
+                # Shift to zero
+                if math.isfinite(min_f):
+                    for i in range(nbins1):
+                        for j in range(nbins2):
+                            if math.isfinite(fes_grid[i][j]):
+                                fes_grid[i][j] -= min_f
+                                
+                # Save 2D data
+                fes2d_path = out_path.parent / (out_path.stem + f"_{cv1}_{cv2}_fes.csv")
+                with fes2d_path.open("w", newline="") as pf:
+                    pw = csv.writer(pf)
+                    pw.writerow([f"{cv1}_center", f"{cv2}_center", "prob", "F_kcal_per_mol"])
+                    for i in range(nbins1):
+                        for j in range(nbins2):
+                            p = bin_counts_2d[i][j] / total_w
+                            pw.writerow([x_centers[i], y_centers[j], p, fes_grid[i][j]])
+                            
+                print(f"Wrote 2D FES for {cv1} vs {cv2} to {fes2d_path}")
+
+                # Plot 2D FES
+                if not args.no_plot:
+                    try:
+                        import matplotlib.pyplot as plt
+                        import matplotlib as mpl
+                        import numpy as np
+                        from rdkit import RDLogger
+                        RDLogger.DisableLog("rdApp.*")
+                    except ImportError:
+                        pass
+                    else:
+                        # Re-apply style just in case
+                        try:
+                            plt.style.use("seaborn-v0_8-whitegrid")
+                        except Exception:
+                            pass
+                            
+                        fig, ax = plt.subplots(figsize=(6, 5))
+                        
+                        # Prepare data for contourf
+                        X, Y = np.meshgrid(x_centers, y_centers, indexing='ij')
+                        Z = np.array(fes_grid)
+                        # Mask infinite values for plotting
+                        Z_masked = np.ma.masked_invalid(Z)
+                        Z_masked = np.ma.masked_where(Z > 20.0, Z_masked) # Cutoff high energy for clarity
+
+                        # Contour plot
+                        levels = np.linspace(0, min(10.0, np.max(Z[np.isfinite(Z)])), 21)
+                        cp = ax.contourf(X, Y, Z_masked, levels=levels, cmap='viridis_r')
+                        fig.colorbar(cp, ax=ax, label='Free energy (kcal/mol)')
+                        
+                        ax.set_xlabel(cv1, fontsize=12, fontweight='bold')
+                        ax.set_ylabel(cv2, fontsize=12, fontweight='bold')
+                        ax.set_title(f"2D FES: {cv1} vs {cv2}\n(T = {args.temperature:.1f} K)", fontsize=13)
+                        
+                        # Scatter plot of microstates (optional, but helpful)
+                        # ax.scatter(cv1_vals, cv2_vals, s=5, c='k', alpha=0.1, linewidths=0)
+
+                        fig.tight_layout()
+                        plot_path = fes2d_path.with_suffix(".png")
+                        fig.savefig(plot_path, dpi=300, bbox_inches="tight")
+                        plt.close(fig)
 
     if ref_summary is not None:
         print(
@@ -673,5 +838,3 @@ def main(argv: Optional[list] = None) -> int:
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())
-
-
