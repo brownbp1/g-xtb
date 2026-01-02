@@ -338,6 +338,24 @@ def main(argv: Optional[list] = None) -> int:
         help="Disable plotting of the 1D free energy profile.",
     )
     parser.add_argument(
+        "--fes-max-kcal",
+        type=float,
+        default=None,
+        help=(
+            "Optional explicit maximum free energy (kcal/mol) for the color scale in 2D FES plots. "
+            "If not set, a data-driven value based on mean(F) + sigma_cutoff * std(F) is used."
+        ),
+    )
+    parser.add_argument(
+        "--fes-sigma-cutoff",
+        type=float,
+        default=2.5,
+        help=(
+            "When --fes-max-kcal is not set, the 2D FES color scale upper bound is "
+            "min(max(F), mean(F) + fes_sigma_cutoff * std(F)). [default: %(default)s]"
+        ),
+    )
+    parser.add_argument(
         "--output",
         default=None,
         help="Optional path for output CSV (default: conformer_free_energies.csv next to energies.csv).",
@@ -810,15 +828,29 @@ def main(argv: Optional[list] = None) -> int:
                         # Prepare data for contourf
                         X, Y = np.meshgrid(x_centers, y_centers, indexing='ij')
                         Z = np.array(fes_grid)
-                        # Mask infinite values for plotting
+                        # Mask only invalid values; high energies will be shown at top of color scale.
                         Z_masked = np.ma.masked_invalid(Z)
-                        Z_masked = np.ma.masked_where(Z > 20.0, Z_masked) # Cutoff high energy for clarity
 
                         finite_Z = Z[np.isfinite(Z)]
                         if finite_Z.size > 0:
-                            z_max = float(np.min([10.0, np.max(finite_Z)]))
+                            if args.fes_max_kcal is not None:
+                                z_max = float(args.fes_max_kcal)
+                            else:
+                                mean_F = float(np.mean(finite_Z))
+                                std_F = float(np.std(finite_Z))
+                                if std_F <= 0.0:
+                                    z_max = float(np.max(finite_Z))
+                                else:
+                                    z_max = float(
+                                        min(
+                                            np.max(finite_Z),
+                                            mean_F + args.fes_sigma_cutoff * std_F,
+                                        )
+                                    )
+                                if z_max <= 0.0:
+                                    z_max = float(np.max(finite_Z))
                         else:
-                            z_max = 10.0
+                            z_max = 1.0
 
                         # Filled contours + line contours for better visual structure
                         levels = np.linspace(0.0, z_max, 21)
