@@ -621,7 +621,10 @@ def main(argv: Optional[list] = None) -> int:
         n_bins = max(1, int(math.ceil((vmax - vmin) / bw)))
         edges = [vmin + i * bw for i in range(n_bins + 1)]
         centers = [0.5 * (edges[i] + edges[i + 1]) for i in range(n_bins)]
-        bin_counts = [0.0 for _ in range(n_bins)]
+        # bin_counts_w: Boltzmann-weighted counts (for F calculation)
+        # bin_counts_n: raw sample counts (for histogram display)
+        bin_counts_w = [0.0 for _ in range(n_bins)]
+        bin_counts_n = [0 for _ in range(n_bins)]
         for v, w in zip(cv_vals, cv_wts):
             # Assign to bin index.
             idx_bin = int((v - vmin) / bw)
@@ -629,12 +632,13 @@ def main(argv: Optional[list] = None) -> int:
                 idx_bin = 0
             elif idx_bin >= n_bins:
                 idx_bin = n_bins - 1
-            bin_counts[idx_bin] += w
-        # Normalize to probabilities.
-        total_w = sum(bin_counts)
+            bin_counts_w[idx_bin] += w
+            bin_counts_n[idx_bin] += 1
+        # Normalize to probabilities (Boltzmann weights).
+        total_w = sum(bin_counts_w)
         if total_w <= 0.0:
             continue
-        bin_probs = [c / total_w for c in bin_counts]
+        bin_probs = [c / total_w for c in bin_counts_w]
         # Convert to free energy in kcal/mol (up to a constant).
         kT = K_B_KCAL_PER_MOL_K * args.temperature
         freeE = [(-kT * math.log(p) if p > 0.0 else float("inf")) for p in bin_probs]
@@ -713,17 +717,17 @@ def main(argv: Optional[list] = None) -> int:
                 bar_width = bw * 0.9
                 axP.bar(
                     centers_arr,
-                    bin_probs,
+                    bin_counts_n,
                     width=bar_width,
                     color="0.85",
                     edgecolor="none",
                     alpha=0.8,
                     align="center",
                 )
-                axP.set_ylabel("Probability", fontsize=10)
+                axP.set_ylabel("Count", fontsize=10)
                 axP.tick_params(axis="y", labelsize=9)
-                if max(bin_probs) > 0.0:
-                    axP.set_ylim(0.0, max(bin_probs) * 1.1)
+                if max(bin_counts_n) > 0:
+                    axP.set_ylim(0.0, max(bin_counts_n) * 1.1)
 
                 # Smoothed free energy curve
                 axF.plot(x_dense, y_smooth, "-k", lw=2)
