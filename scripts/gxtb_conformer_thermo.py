@@ -695,15 +695,51 @@ def main(argv: Optional[list] = None) -> int:
 
                 fig, ax = plt.subplots(figsize=(5, 3.5))
                 ax.plot(centers, freeE, "-k", lw=2)
-                ax.set_xlabel(cv_col, fontsize=12, fontweight='bold')
-                ax.set_ylabel("Free energy (kcal/mol)", fontsize=12, fontweight='bold')
+
+                # Mark reference value on the CV axis, if available.
+                ref_x: Optional[float] = None
+                # Structural references:
+                if cv_col in ("torsion_dist", "rmsd") or (
+                    cv_col.startswith("d_torsion") and cv_col.endswith("_deg")
+                ):
+                    ref_x = 0.0
+                elif torsion_defs and "ref_torsions_deg" in locals():
+                    # Columns like torsion1_deg, torsion2_deg, ...
+                    if cv_col.startswith("torsion") and cv_col.endswith("_deg") and not cv_col.startswith("d_torsion"):
+                        num_str = cv_col[len("torsion") : -len("_deg")]
+                        try:
+                            j = int(num_str)
+                            if 1 <= j <= len(ref_torsions_deg):
+                                ref_x = ref_torsions_deg[j - 1]
+                        except ValueError:
+                            ref_x = None
+                # If a thermodynamic reference conformer was provided, also mark its CV value.
+                ref_cv_from_index: Optional[float] = None
+                if args.ref_index is not None:
+                    for row in per_conf:
+                        if row.get("index") == args.ref_index and cv_col in row:
+                            try:
+                                ref_cv_from_index = float(row[cv_col])
+                            except (TypeError, ValueError):
+                                ref_cv_from_index = None
+                            break
+
+                if ref_x is not None:
+                    ax.axvline(ref_x, color="red", linestyle="--", linewidth=1.5, label="structural ref")
+                if ref_cv_from_index is not None and (ref_x is None or abs(ref_cv_from_index - ref_x) > 1e-6):
+                    ax.axvline(ref_cv_from_index, color="blue", linestyle=":", linewidth=1.5, label="ref_index")
+                if (ref_x is not None) or (ref_cv_from_index is not None):
+                    ax.legend(frameon=False, fontsize=9)
+
+                ax.set_xlabel(cv_col, fontsize=12, fontweight="bold")
+                ax.set_ylabel("Free energy (kcal/mol)", fontsize=12, fontweight="bold")
                 ax.set_title(f"1D FES along {cv_col}\n(T = {args.temperature:.1f} K)", fontsize=13)
-                
+
                 # Improve tick labels
-                ax.tick_params(axis='both', which='major', labelsize=10)
-                
+                ax.tick_params(axis="both", which="major", labelsize=10)
+
                 # Add grid but make it subtle
-                ax.grid(True, linestyle=':', alpha=0.6)
+                ax.grid(True, linestyle=":", alpha=0.6)
 
                 fig.tight_layout()
                 plot_path = profile_path.with_suffix(".png")
@@ -864,6 +900,51 @@ def main(argv: Optional[list] = None) -> int:
                         ax.set_xlabel(cv1, fontsize=12, fontweight='bold')
                         ax.set_ylabel(cv2, fontsize=12, fontweight='bold')
                         ax.set_title(f"2D FES: {cv1} vs {cv2}\n(T = {args.temperature:.1f} K)", fontsize=13)
+
+                        # Mark structural reference point if available.
+                        ref_x_2d: Optional[float] = None
+                        ref_y_2d: Optional[float] = None
+
+                        # Helper to decode torsion index from column name.
+                        def _torsion_index_from_col(col: str) -> Optional[int]:
+                            if col.startswith("torsion") and col.endswith("_deg") and not col.startswith("d_torsion"):
+                                num_str = col[len("torsion") : -len("_deg")]
+                                try:
+                                    return int(num_str)
+                                except ValueError:
+                                    return None
+                            return None
+
+                        if torsion_defs and "ref_torsions_deg" in locals():
+                            idx1 = _torsion_index_from_col(cv1)
+                            idx2 = _torsion_index_from_col(cv2)
+                            if idx1 is not None and 1 <= idx1 <= len(ref_torsions_deg):
+                                ref_x_2d = ref_torsions_deg[idx1 - 1]
+                            if idx2 is not None and 1 <= idx2 <= len(ref_torsions_deg):
+                                ref_y_2d = ref_torsions_deg[idx2 - 1]
+
+                        # Distance-like CVs use 0 as the reference.
+                        if ref_x_2d is None and (
+                            cv1 in ("torsion_dist", "rmsd") or (cv1.startswith("d_torsion") and cv1.endswith("_deg"))
+                        ):
+                            ref_x_2d = 0.0
+                        if ref_y_2d is None and (
+                            cv2 in ("torsion_dist", "rmsd") or (cv2.startswith("d_torsion") and cv2.endswith("_deg"))
+                        ):
+                            ref_y_2d = 0.0
+
+                        if ref_x_2d is not None and ref_y_2d is not None:
+                            ax.plot(
+                                ref_x_2d,
+                                ref_y_2d,
+                                marker="*",
+                                color="red",
+                                markersize=10,
+                                markeredgecolor="k",
+                                zorder=5,
+                                label="structural ref",
+                            )
+                            ax.legend(frameon=False, fontsize=9, loc="upper right")
 
                         # Subtle grid, but keep background clean
                         ax.grid(True, linestyle=':', alpha=0.4)
