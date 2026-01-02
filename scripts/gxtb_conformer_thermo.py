@@ -501,25 +501,41 @@ def main(argv: Optional[list] = None) -> int:
             row["torsion_dist"] = torsion_dist
 
     # Determine default CV column and bin width for 1D free energy profile.
+    # Decide which CV columns to generate profiles for:
+    # - if --cv-column is given: just that one
+    # - else: automatically scan per_conf rows for distance-like and CV-like columns.
     if args.cv_column:
-        cv_col = args.cv_column
+        cv_columns = [args.cv_column]
     else:
-        if torsion_defs:
-            cv_col = "torsion_dist"
-        elif rmsd_map is not None:
-            cv_col = "rmsd"
-        else:
-            cv_col = "dE_rel_min_kcal"
+        # Start with a stable order: energy distance, rmsd, torsion distance.
+        cv_columns = []
+        if "dE_rel_min_kcal" in per_conf[0]:
+            cv_columns.append("dE_rel_min_kcal")
+        if "rmsd" in per_conf[0]:
+            cv_columns.append("rmsd")
+        if "torsion_dist" in per_conf[0]:
+            cv_columns.append("torsion_dist")
+        # Add individual torsion distances and raw torsions if present.
+        for key in per_conf[0].keys():
+            if key.startswith("d_torsion") and key.endswith("_deg"):
+                if key not in cv_columns:
+                    cv_columns.append(key)
+        for key in per_conf[0].keys():
+            if key.startswith("torsion") and key.endswith("_deg") and not key.startswith("d_torsion"):
+                if key not in cv_columns:
+                    cv_columns.append(key)
 
-    if args.bin_width is not None:
-        bin_width = args.bin_width
-    else:
-        if cv_col.endswith("_deg"):
-            bin_width = 10.0
-        elif cv_col in ("torsion_dist", "rmsd"):
-            bin_width = 0.1
-        else:
-            bin_width = 0.5  # generic default in CV units
+    # Bin width heuristics per column, can be overridden globally with --bin-width.
+    def default_bin_width(col: str) -> float:
+        if args.bin_width is not None:
+            return args.bin_width
+        if col.endswith("_deg"):
+            return 10.0
+        if col in ("torsion_dist", "rmsd"):
+            return 0.1
+        if col == "dE_rel_min_kcal":
+            return 0.5
+        return 0.5
 
     # Write output CSV.
     fieldnames = [
@@ -548,32 +564,38 @@ def main(argv: Optional[list] = None) -> int:
 
     print(f"Wrote conformer free energies to {out_path}")
 
-    # Build 1D free energy profile along the CV.
-    # Extract (CV, prob) pairs.
-    cv_vals: List[float] = []
-    cv_wts: List[float] = []
-    for row in per_conf:
-        v = row.get(cv_col)
-        if v is None:
-            continue
-        try:
-            v_f = float(v)
-        except (TypeError, ValueError):
-            continue
-        cv_vals.append(v_f)
-        cv_wts.append(float(row.get("prob", 0.0)))
+    # Build 1D free energy profiles for each selected CV column.
+    for cv_col in cv_columns:
+        # Extract (CV, prob) pairs.
+        cv_vals: List[float] = []
+        cv_wts: List[float] = []
+        for row in per_conf:
+            v = row.get(cv_col)
+            if v is None:
+                continue
+            try:
+                v_f = float(v)
+            except (TypeError, ValueError):
+                continue
+            cv_vals.append(v_f)
+            cv_wts.append(float(row.get("prob", 0.0)))
 
-    if cv_vals and sum(cv_wts) > 0.0:
+        if not cv_vals or sum(cv_wts) <= 0.0:
+            continue
+
+        bw = default_bin_width(cv_col)
         vmin = min(cv_vals)
         vmax = max(cv_vals)
+        if vmax == vmin:
+            continue
         # Ensure at least one bin.
-        n_bins = max(1, int(math.ceil((vmax - vmin) / bin_width)))
-        edges = [vmin + i * bin_width for i in range(n_bins + 1)]
+        n_bins = max(1, int(math.ceil((vmax - vmin) / bw)))
+        edges = [vmin + i * bw for i in range(n_bins + 1)]
         centers = [0.5 * (edges[i] + edges[i + 1]) for i in range(n_bins)]
         bin_counts = [0.0 for _ in range(n_bins)]
         for v, w in zip(cv_vals, cv_wts):
             # Assign to bin index.
-            idx_bin = int((v - vmin) / bin_width)
+            idx_bin = int((v - vmin) / bw)
             if idx_bin < 0:
                 idx_bin = 0
             elif idx_bin >= n_bins:
@@ -581,59 +603,56 @@ def main(argv: Optional[list] = None) -> int:
             bin_counts[idx_bin] += w
         # Normalize to probabilities.
         total_w = sum(bin_counts)
-        if total_w > 0.0:
-            bin_probs = [c / total_w for c in bin_counts]
-            # Convert to free energy in kcal/mol (up to a constant).
-            kT = K_B_KCAL_PER_MOL_K * args.temperature
-            freeE = [
-                (-kT * math.log(p) if p > 0.0 else float("inf")) for p in bin_probs
-            ]
-            finite_F = [f for f in freeE if math.isfinite(f)]
-            if finite_F:
-                Fmin = min(finite_F)
-                freeE = [f - Fmin if math.isfinite(f) else f for f in freeE]
+        if total_w <= 0.0:
+            continue
+        bin_probs = [c / total_w for c in bin_counts]
+        # Convert to free energy in kcal/mol (up to a constant).
+        kT = K_B_KCAL_PER_MOL_K * args.temperature
+        freeE = [(-kT * math.log(p) if p > 0.0 else float("inf")) for p in bin_probs]
+        finite_F = [f for f in freeE if math.isfinite(f)]
+        if finite_F:
+            Fmin = min(finite_F)
+            freeE = [f - Fmin if math.isfinite(f) else f for f in freeE]
 
-            profile_path = out_path.parent / (
-                out_path.stem + f"_{cv_col}_profile.csv"
+        profile_path = out_path.parent / (out_path.stem + f"_{cv_col}_profile.csv")
+        with profile_path.open("w", newline="") as pf:
+            pw = csv.writer(pf)
+            pw.writerow(
+                ["bin_center", "bin_left", "bin_right", "prob", "F_kcal_per_mol"]
             )
-            with profile_path.open("w", newline="") as pf:
-                pw = csv.writer(pf)
-                pw.writerow(
-                    ["bin_center", "bin_left", "bin_right", "prob", "F_kcal_per_mol"]
+            for c_center, left, right, p, fE in zip(
+                centers, edges[:-1], edges[1:], bin_probs, freeE
+            ):
+                pw.writerow([c_center, left, right, p, fE])
+
+        print(
+            f"Wrote 1D free energy profile for CV='{cv_col}' to {profile_path} "
+            f"(bin_width={bw})"
+        )
+
+        # Optional plotting.
+        if not args.no_plot:
+            try:
+                import matplotlib.pyplot as plt
+                from rdkit import RDLogger
+
+                RDLogger.DisableLog("rdApp.*")
+            except ImportError:
+                print(
+                    "matplotlib not available; skipping free energy plot.",
+                    file=sys.stderr,
                 )
-                for c_center, left, right, p, fE in zip(
-                    centers, edges[:-1], edges[1:], bin_probs, freeE
-                ):
-                    pw.writerow([c_center, left, right, p, fE])
-
-            print(
-                f"Wrote 1D free energy profile for CV='{cv_col}' to {profile_path} "
-                f"(bin_width={bin_width})"
-            )
-
-            # Optional plotting.
-            if not args.no_plot:
-                try:
-                    import matplotlib.pyplot as plt
-                    from rdkit import RDLogger
-
-                    RDLogger.DisableLog("rdApp.*")
-                except ImportError:
-                    print(
-                        "matplotlib not available; skipping free energy plot.",
-                        file=sys.stderr,
-                    )
-                else:
-                    plt.style.use("seaborn-v0_8-whitegrid")
-                    fig, ax = plt.subplots(figsize=(5, 3.5))
-                    ax.plot(centers, freeE, "-k", lw=2)
-                    ax.set_xlabel(cv_col)
-                    ax.set_ylabel("Free energy (kcal/mol)")
-                    ax.set_title(f"1D free energy profile (T = {args.temperature:.1f} K)")
-                    fig.tight_layout()
-                    plot_path = profile_path.with_suffix(".png")
-                    fig.savefig(plot_path, dpi=300, bbox_inches="tight")
-                    plt.close(fig)
+            else:
+                plt.style.use("seaborn-v0_8-whitegrid")
+                fig, ax = plt.subplots(figsize=(5, 3.5))
+                ax.plot(centers, freeE, "-k", lw=2)
+                ax.set_xlabel(cv_col)
+                ax.set_ylabel("Free energy (kcal/mol)")
+                ax.set_title(f"1D free energy profile (T = {args.temperature:.1f} K)")
+                fig.tight_layout()
+                plot_path = profile_path.with_suffix(".png")
+                fig.savefig(plot_path, dpi=300, bbox_inches="tight")
+                plt.close(fig)
 
     if ref_summary is not None:
         print(
