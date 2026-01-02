@@ -144,7 +144,9 @@ def set_torsions_and_minimize(
     if len(torsions) != len(angles):
         raise ValueError("Number of torsion defs and angle sets do not match")
 
-    m = Chem.Mol(mol)
+    # Work in-place on the requested conformer to avoid large memory blow-ups
+    # when scanning many grid points and generating ensembles per point.
+    m = mol
     conf = m.GetConformer(conf_id)
 
     # Optionally randomize coordinates slightly to generate an ensemble
@@ -244,17 +246,6 @@ def _add_torsion_constraint(
         except TypeError:
             pass
     # No supported constraint helper found; leave unconstrained.
-
-
-def _copy_single_conformer(mol: Chem.Mol, conf_id: int) -> Chem.Mol:
-    """Return a copy of mol containing only conformer conf_id."""
-    m = Chem.Mol(mol)
-    keep = m.GetConformer(conf_id)
-    # Remove all conformers, then add back the one we want.
-    for cid in list(range(m.GetNumConformers())):
-        m.RemoveConformer(cid)
-    m.AddConformer(Chem.Conformer(keep), assignId=True)
-    return m
 
 
 def _embed_conformers_etkdg(
@@ -415,6 +406,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         required=True,
         help="Output multi-record SDF with all minimized torsion scan conformers.",
     )
+    parser.add_argument(
+        "--max-total-confs",
+        type=int,
+        default=200000,
+        help="Safety limit: maximum total conformers to write (grid_points * confs_per_grid). "
+             "[default: %(default)s]",
+    )
 
     args = parser.parse_args(argv)
 
@@ -454,6 +452,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     grid_points = generate_torsion_grid(tdefs)
     if not grid_points:
         raise SystemExit("ERROR: no grid points generated; check --grid specifications.")
+    total_to_write = len(grid_points) * int(args.confs_per_grid)
+    if total_to_write > int(args.max_total_confs):
+        raise SystemExit(
+            f"ERROR: scan would generate {total_to_write} conformers "
+            f"({len(grid_points)} grid points * {args.confs_per_grid} confs/grid), "
+            f"exceeding --max-total-confs={args.max_total_confs}. "
+            "Increase --max-total-confs or coarsen the grid / reduce confs per grid."
+        )
 
     out_path = Path(args.output).resolve()
     writer = Chem.SDWriter(str(out_path))
@@ -518,14 +524,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                 conf_id=cid,
                 allow_ring_torsions=args.allow_ring_torsions,
             )
-            m_out = _copy_single_conformer(m_min, cid)
-            # Annotate SD properties.
+            # Annotate SD properties on the molecule, then write the specific conformer.
             for i, (target, final) in enumerate(zip(angles, final_tors), start=1):
-                m_out.SetProp(f"torsion{i}_target_deg", f"{target:.3f}")
-                m_out.SetProp(f"torsion{i}_final_deg", f"{final:.3f}")
-            m_out.SetProp("grid_index", str(grid_idx))
-            m_out.SetProp("rep_index", str(rep))
-            writer.write(m_out)
+                m_min.SetProp(f"torsion{i}_target_deg", f"{target:.3f}")
+                m_min.SetProp(f"torsion{i}_final_deg", f"{final:.3f}")
+            m_min.SetProp("grid_index", str(grid_idx))
+            m_min.SetProp("rep_index", str(rep))
+            writer.write(m_min, confId=cid)
             conf_counter += 1
 
     writer.close()
