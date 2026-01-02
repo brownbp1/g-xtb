@@ -142,6 +142,58 @@ python scripts/gxtb_optimize_conformers.py conformers.sdf \
   --outdir gxtb_runs
 ```
 
+### Conformational free energies for a ligand
+
+Given `gxtb_runs/energies.csv` from the previous step, you can compute Boltzmann
+probabilities and conformational free energies with:
+
+```bash
+# basic: free energies + Boltzmann probabilities
+python scripts/gxtb_conformer_thermo.py gxtb_runs \
+  --temperature 298.15 \
+  --ref-index 1
+```
+
+This will write `gxtb_runs/conformer_free_energies.csv` with columns:
+
+- `index` – conformer index (matching `energies.csv`)
+- `E_Eh` – g-xTB total energy in Hartree
+- `dE_rel_min_Eh`, `dE_rel_min_kcal` – relative to the minimum-energy conformer
+- `prob` – Boltzmann probability at the given temperature
+- `dG_vs_ref_kcal` – conformational free energy of conformer i relative to the reference
+
+Additionally, a one-line summary of the reference conformer (probability and
+ΔG_conf in kcal/mol) is printed to stdout.
+
+### Optional: PNear metric (energy–structure funnel)
+
+If you also provide per-conformer RMSDs to a chosen reference conformer, the script
+can compute a PNear-like metric:
+
+```bash
+python scripts/gxtb_conformer_thermo.py gxtb_runs \
+  --temperature 298.15 \
+  --ref-index 1 \
+  --rmsd-csv rmsd_vs_ref.csv \
+  --rmsd-column rmsd_to_ref \
+  --pn-lambda 1.0
+```
+
+Here `rmsd_vs_ref.csv` must contain at least:
+
+- `index` – conformer indices matching `energies.csv`
+- `rmsd_to_ref` – RMSD (Å) to the reference conformer
+
+The script then evaluates
+
+\\[
+P_\\text{Near} = \\frac{\\sum_i e^{-(\\mathrm{RMSD}_i/\\lambda)^2} w_i}{\\sum_i w_i}
+\\]
+
+with \\(w_i\\) the Boltzmann weights from the g-xTB energies and \\(\\lambda\\) a
+user-chosen RMSD scale (Å). A larger PNear means that low-energy conformers are
+clustered near the reference.
+
 ### Numerical Hessian
 
 ```
