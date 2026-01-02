@@ -55,34 +55,6 @@ def read_xyz_coords(xyz_path: Path) -> List[Tuple[str, float, float, float]]:
     return coords
 
 
-def build_multi_conformer_mol(
-    template_mol: rdchem.Mol,
-    xtbopt_files: List[Path],
-) -> rdchem.Mol:
-    """
-    Create a copy of template_mol and attach one Conformer per xtbopt.xyz file.
-    """
-    n_atoms = template_mol.GetNumAtoms()
-    mol = Chem.Mol(template_mol)
-    # Remove any existing conformers.
-    for cid in list(range(mol.GetNumConformers())):
-        mol.RemoveConformer(cid)
-
-    for i, xyz_path in enumerate(xtbopt_files, start=1):
-        coords = read_xyz_coords(xyz_path)
-        if len(coords) != n_atoms:
-            raise ValueError(
-                f"{xyz_path}: expected {n_atoms} atoms, found {len(coords)}"
-            )
-        conf = rdchem.Conformer(n_atoms)
-        for idx, (_, x, y, z) in enumerate(coords):
-            conf.SetAtomPosition(idx, Point3D(x, y, z))
-        conf.SetId(i - 1)
-        mol.AddConformer(conf, assignId=True)
-
-    return mol
-
-
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="Collect xtbopt.xyz geometries into a multi-conformer SDF.",
@@ -142,22 +114,31 @@ def main(argv=None) -> int:
     if template is None:
         raise SystemExit(f"ERROR: no valid molecules found in {input_sdf}")
 
-    if template.GetNumAtoms() != len(read_xyz_coords(xtbopt_files[0])):
-        raise SystemExit(
-            "ERROR: atom count mismatch between template SDF and xtbopt.xyz. "
-            "Make sure you passed the correct input SDF."
-        )
-
-    mol = build_multi_conformer_mol(template, xtbopt_files)
-
     w = Chem.SDWriter(str(output_sdf))
-    # Write one record per conformer.
-    for conf in mol.GetConformers():
-        w.write(mol, confId=conf.GetId())
+    n_atoms = template.GetNumAtoms()
+
+    # Write one record per conformer, as separate molecules sharing the same topology.
+    for i, xyz_path in enumerate(xtbopt_files, start=1):
+        coords = read_xyz_coords(xyz_path)
+        if len(coords) != n_atoms:
+            raise SystemExit(
+                f"ERROR: {xyz_path} has {len(coords)} atoms, but template has {n_atoms}. "
+                "Make sure you passed the correct input SDF."
+            )
+        mol = Chem.Mol(template)
+        # Remove any pre-existing conformers and add a fresh one.
+        for cid in list(range(mol.GetNumConformers())):
+            mol.RemoveConformer(cid)
+        conf = rdchem.Conformer(n_atoms)
+        for idx, (_, x, y, z) in enumerate(coords):
+            conf.SetAtomPosition(idx, Point3D(x, y, z))
+        mol.AddConformer(conf, assignId=True)
+        mol.SetIntProp("_ConformerIndex", i)
+        w.write(mol)
     w.close()
 
     print(
-        f"Wrote {mol.GetNumConformers()} conformers with xtb-optimized geometries to {output_sdf}"
+        f"Wrote {len(xtbopt_files)} conformers with xtb-optimized geometries to {output_sdf}"
     )
 
     return 0
