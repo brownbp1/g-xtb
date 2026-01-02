@@ -104,21 +104,34 @@ def main(argv=None) -> int:
             raise SystemExit(f"ERROR: {xyz_path} not found")
         xtbopt_files.append(xyz_path)
 
-    # Use first molecule from input SDF as topology template.
-    suppl = Chem.SDMolSupplier(str(input_sdf), removeHs=False)
-    template = None
-    for mol in suppl:
-        if mol is not None:
-            template = mol
-            break
-    if template is None:
-        raise SystemExit(f"ERROR: no valid molecules found in {input_sdf}")
-
     w = Chem.SDWriter(str(output_sdf))
-    n_atoms = template.GetNumAtoms()
+    # Stream templates from input SDF so we preserve *per-record* SD properties
+    # (e.g., torsion scan grid indices) while keeping topology/atom order consistent.
+    suppl = Chem.SDMolSupplier(str(input_sdf), removeHs=False)
+
+    def iter_valid_mols():
+        for m in suppl:
+            if m is not None:
+                yield m
+
+    tmpl_iter = iter_valid_mols()
+    first_template = next(tmpl_iter, None)
+    if first_template is None:
+        raise SystemExit(f"ERROR: no valid molecules found in {input_sdf}")
+    n_atoms = first_template.GetNumAtoms()
 
     # Write one record per conformer, as separate molecules sharing the same topology.
     for i, xyz_path in enumerate(xtbopt_files, start=1):
+        # Get the template molecule for this index (preserving SD tags).
+        if i == 1:
+            template = first_template
+        else:
+            template = next(tmpl_iter, None)
+        if template is None:
+            raise SystemExit(
+                f"ERROR: input SDF has fewer valid molecules than run_dir ({i-1} < {len(xtbopt_files)}). "
+                "Make sure --input-sdf corresponds to the run_dir."
+            )
         coords = read_xyz_coords(xyz_path)
         if len(coords) != n_atoms:
             raise SystemExit(
@@ -134,6 +147,8 @@ def main(argv=None) -> int:
             conf.SetAtomPosition(idx, Point3D(x, y, z))
         mol.AddConformer(conf, assignId=True)
         mol.SetIntProp("_ConformerIndex", i)
+        # Convenience: set an SDF property matching energies.csv indexing.
+        mol.SetProp("index", str(i))
         w.write(mol)
     w.close()
 

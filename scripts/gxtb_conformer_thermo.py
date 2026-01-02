@@ -279,6 +279,14 @@ def main(argv: Optional[list] = None) -> int:
              "(same atom count; same connectivity; for torsions, same atom order).",
     )
     parser.add_argument(
+        "--sdf-prop",
+        action="append",
+        default=[],
+        help="Copy an SD property from --sdf into the output table (can be repeated). "
+             "Useful for torsion scan workflows (e.g. --sdf-prop grid_index "
+             "--sdf-prop torsion1_target_deg).",
+    )
+    parser.add_argument(
         "--rmsd-ref-index",
         type=int,
         default=None,
@@ -453,6 +461,17 @@ def main(argv: Optional[list] = None) -> int:
         pn_lambda=pn_lambda,
     )
 
+    # Optionally copy requested SD properties from the conformer SDF into per_conf rows.
+    if args.sdf_prop:
+        if conf_mols is None:
+            raise SystemExit("--sdf-prop requires --sdf.")
+        # We assume 1-based indexing corresponds to SDF order.
+        for i, mol in enumerate(conf_mols, start=1):
+            row = per_conf[i - 1]
+            for prop in args.sdf_prop:
+                if mol.HasProp(prop):
+                    row[prop] = mol.GetProp(prop)
+
     # Optional torsion analysis based on SDF and user-provided atom indices.
     torsion_defs: List[Tuple[int, int, int, int]] = []
     if args.torsion:
@@ -577,6 +596,10 @@ def main(argv: Optional[list] = None) -> int:
             fieldnames.append(f"torsion{j}_deg")
             fieldnames.append(f"d_torsion{j}_deg")
         fieldnames.append("torsion_dist")
+    # Include any requested SD properties.
+    for prop in args.sdf_prop:
+        if prop not in fieldnames:
+            fieldnames.append(prop)
     if args.ref_index is not None:
         fieldnames.append("dG_vs_ref_kcal")
 
