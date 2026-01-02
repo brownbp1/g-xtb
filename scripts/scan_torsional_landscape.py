@@ -133,6 +133,7 @@ def set_torsions_and_minimize(
     torsion_tol_deg: float = 1.0,
     torsion_force: float = 100.0,
     conf_id: int = 0,
+    allow_ring_torsions: bool = False,
 ) -> Tuple[Chem.Mol, List[float]]:
     """
     Take a molecule with a single conformer, set the torsions to target angles,
@@ -157,6 +158,20 @@ def set_torsions_and_minimize(
             conf.SetAtomPosition(idx, Point3D(p.x + dx, p.y + dy, p.z + dz))
 
     for td, ang in zip(torsions, angles):
+        # RDKit cannot "set" a dihedral by rotating a bond that is in a ring.
+        # We can still *restrain* that dihedral during minimization, but we
+        # must skip the explicit SetDihedralDeg step.
+        bond = m.GetBondBetweenAtoms(td.a2, td.a3)
+        if bond is not None and bond.IsInRing():
+            if not allow_ring_torsions:
+                raise ValueError(
+                    f"Central bond (j,k)=({td.a2+1},{td.a3+1}) is in a ring; RDKit cannot set "
+                    f"dihedral for torsion ({td.a1+1},{td.a2+1},{td.a3+1},{td.a4+1}). "
+                    "Pick a torsion whose central bond is not in a ring, or pass --allow-ring-torsions "
+                    "to rely on forcefield restraints only."
+                )
+            # Skip explicit set; minimizer restraints (added below) may still drive it.
+            continue
         rdMolTransforms.SetDihedralDeg(conf, td.a1, td.a2, td.a3, td.a4, ang)
 
     # Minimize with MMFF94s.
@@ -389,6 +404,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Force constant used for torsion constraints during MMFF94s minimization. [default: %(default)s]",
     )
     parser.add_argument(
+        "--allow-ring-torsions",
+        action="store_true",
+        help="Allow torsion definitions whose central bond (j-k) is in a ring. "
+             "RDKit cannot explicitly set such dihedrals; the script will instead "
+             "rely on torsion restraints during MMFF94s minimization.",
+    )
+    parser.add_argument(
         "--output",
         required=True,
         help="Output multi-record SDF with all minimized torsion scan conformers.",
@@ -494,6 +516,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 torsion_tol_deg=args.torsion_tol_deg,
                 torsion_force=args.torsion_force,
                 conf_id=cid,
+                allow_ring_torsions=args.allow_ring_torsions,
             )
             m_out = _copy_single_conformer(m_min, cid)
             # Annotate SD properties.
