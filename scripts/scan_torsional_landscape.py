@@ -704,7 +704,6 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     conf_counter = 0
     for grid_idx, angles in enumerate(grid_points, start=1):
-        grid_timers = _Timers(enabled=(not args.no_timing))
         # Create a working molecule with multiple conformers for this grid point.
         with _Timer(timers, "per_grid:setup_work"):
             work = Chem.Mol(ref_mol)
@@ -798,7 +797,6 @@ def main(argv: Optional[List[str]] = None) -> int:
 
             # Diversity-fill
             remaining_ids = [cid for cid in cand_ids if cid not in seed_ids]
-            remaining_es = [cand_energies[cand_ids.index(cid)] for cid in remaining_ids]
             # Run farthest-point selection on remaining, but starting set is seed_ids.
             # We do this by temporarily selecting k' from remaining, using the first as seed
             # and then merging; to respect the existing seed set, we greedily add points
@@ -817,10 +815,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                         if min_d > best_min_dist:
                             best_min_dist = min_d
                             best_cid = cid
-                        if best_cid is None:
-                            break
-                        selected.append(best_cid)
+                    if best_cid is None:
+                        break
+                    selected.append(best_cid)
+                    # Remove exactly once per outer iteration.
+                    try:
                         remaining_ids.remove(best_cid)
+                    except ValueError:
+                        # Should not happen, but avoid crashing mid-run.
+                        break
 
         # Final stage: fully minimize only the selected conformers, then write.
         with _Timer(timers, "per_grid:final_minimize+write"):
