@@ -790,19 +790,23 @@ def main(argv: Optional[list] = None) -> int:
                         import matplotlib.pyplot as plt
                         import matplotlib as mpl
                         import numpy as np
-                        from rdkit import RDLogger
-                        RDLogger.DisableLog("rdApp.*")
                     except ImportError:
                         pass
                     else:
-                        # Re-apply style just in case
-                        try:
-                            plt.style.use("seaborn-v0_8-whitegrid")
-                        except Exception:
-                            pass
-                            
-                        fig, ax = plt.subplots(figsize=(6, 5))
-                        
+                        # Publication-quality styling similar to 1D plots
+                        mpl.rcParams['font.family'] = 'sans-serif'
+                        mpl.rcParams['font.sans-serif'] = ['Arial', 'Helvetica', 'DejaVu Sans']
+                        mpl.rcParams['font.size'] = 12
+                        mpl.rcParams['axes.linewidth'] = 1.5
+                        mpl.rcParams['xtick.major.width'] = 1.5
+                        mpl.rcParams['ytick.major.width'] = 1.5
+                        mpl.rcParams['xtick.direction'] = 'out'
+                        mpl.rcParams['ytick.direction'] = 'out'
+                        mpl.rcParams['figure.dpi'] = 300
+                        mpl.rcParams['savefig.bbox'] = 'tight'
+
+                        fig, ax = plt.subplots(figsize=(5.5, 4.5))
+
                         # Prepare data for contourf
                         X, Y = np.meshgrid(x_centers, y_centers, indexing='ij')
                         Z = np.array(fes_grid)
@@ -810,17 +814,31 @@ def main(argv: Optional[list] = None) -> int:
                         Z_masked = np.ma.masked_invalid(Z)
                         Z_masked = np.ma.masked_where(Z > 20.0, Z_masked) # Cutoff high energy for clarity
 
-                        # Contour plot
-                        levels = np.linspace(0, min(10.0, np.max(Z[np.isfinite(Z)])), 21)
-                        cp = ax.contourf(X, Y, Z_masked, levels=levels, cmap='viridis_r')
-                        fig.colorbar(cp, ax=ax, label='Free energy (kcal/mol)')
-                        
+                        finite_Z = Z[np.isfinite(Z)]
+                        if finite_Z.size > 0:
+                            z_max = float(np.min([10.0, np.max(finite_Z)]))
+                        else:
+                            z_max = 10.0
+
+                        # Filled contours + line contours for better visual structure
+                        levels = np.linspace(0.0, z_max, 21)
+                        cf = ax.contourf(X, Y, Z_masked, levels=levels, cmap='viridis')
+                        ax.contour(X, Y, Z_masked, levels=levels[::4], colors='k', linewidths=0.4)
+
+                        cbar = fig.colorbar(cf, ax=ax)
+                        cbar.set_label('Free energy (kcal/mol)', fontsize=11)
+                        cbar.ax.tick_params(labelsize=9)
+
                         ax.set_xlabel(cv1, fontsize=12, fontweight='bold')
                         ax.set_ylabel(cv2, fontsize=12, fontweight='bold')
                         ax.set_title(f"2D FES: {cv1} vs {cv2}\n(T = {args.temperature:.1f} K)", fontsize=13)
-                        
-                        # Scatter plot of microstates (optional, but helpful)
-                        # ax.scatter(cv1_vals, cv2_vals, s=5, c='k', alpha=0.1, linewidths=0)
+
+                        # Subtle grid, but keep background clean
+                        ax.grid(True, linestyle=':', alpha=0.4)
+                        ax.tick_params(axis='both', which='major', labelsize=10)
+
+                        ax.set_xlim(min1, max1)
+                        ax.set_ylim(min2, max2)
 
                         fig.tight_layout()
                         plot_path = fes2d_path.with_suffix(".png")
