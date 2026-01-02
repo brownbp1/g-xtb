@@ -806,21 +806,21 @@ def main(argv: Optional[List[str]] = None) -> int:
             selected = list(seed_ids)
             with _Timer(timers, "per_grid:diversity_select"):
                 while len(selected) < n_keep and remaining_ids:
-                best_cid = None
-                best_min_dist = -1.0
-                for cid in remaining_ids:
-                    min_d = float("inf")
-                    for s_cid in selected:
-                        d = _rmsd_noalign(work, s_cid, cid, atom_ids=atom_ids)
-                        if d < min_d:
-                            min_d = d
-                    if min_d > best_min_dist:
-                        best_min_dist = min_d
-                        best_cid = cid
-                    if best_cid is None:
-                        break
-                    selected.append(best_cid)
-                    remaining_ids.remove(best_cid)
+                    best_cid = None
+                    best_min_dist = -1.0
+                    for cid in remaining_ids:
+                        min_d = float("inf")
+                        for s_cid in selected:
+                            d = _rmsd_noalign(work, s_cid, cid, atom_ids=atom_ids)
+                            if d < min_d:
+                                min_d = d
+                        if min_d > best_min_dist:
+                            best_min_dist = min_d
+                            best_cid = cid
+                        if best_cid is None:
+                            break
+                        selected.append(best_cid)
+                        remaining_ids.remove(best_cid)
 
         # Final stage: fully minimize only the selected conformers, then write.
         with _Timer(timers, "per_grid:final_minimize+write"):
