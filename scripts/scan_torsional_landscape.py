@@ -591,6 +591,23 @@ def main(argv: Optional[List[str]] = None) -> int:
              "--candidate-mmff-iter steps (or just an energy evaluation if 0). [default: %(default)s]",
     )
     parser.add_argument(
+        "--min-unique-rmsd",
+        type=float,
+        default=0.10,
+        help="Minimum heavy-atom RMSD (Å) required to consider two conformers distinct "
+             "within the same torsion grid point. If a newly minimized conformer is within "
+             "this RMSD of an already-saved conformer, it will be skipped (and we may save "
+             "fewer than --confs-per-grid if no diverse conformers exist). [default: %(default)s]",
+    )
+    parser.add_argument(
+        "--pre-min-unique-rmsd",
+        type=float,
+        default=None,
+        help="Pre-minimization uniqueness threshold (Å) applied to candidate conformers "
+             "BEFORE running full MMFF minimization. If omitted, uses --embed-prune-rms "
+             "when > 0, otherwise falls back to --min-unique-rmsd.",
+    )
+    parser.add_argument(
         "--coord-jitter",
         type=float,
         default=0.2,
@@ -826,8 +843,52 @@ def main(argv: Optional[List[str]] = None) -> int:
                         break
 
         # Final stage: fully minimize only the selected conformers, then write.
+        # Build a proposal list: start with the selected diverse set, then try
+        # additional candidates (lowest energy first) to fill gaps if we skip duplicates.
+        proposal = list(selected)
+        leftovers = [cid for cid in cand_ids if cid not in proposal]
+        # Sort leftovers by candidate energy (None last).
+        leftovers.sort(
+            key=lambda cid: (
+                cand_energies[cand_ids.index(cid)] is None,
+                cand_energies[cand_ids.index(cid)]
+                if cand_energies[cand_ids.index(cid)] is not None
+                else 0.0,
+            )
+        )
+        proposal.extend(leftovers)
+
         with _Timer(timers, "per_grid:final_minimize+write"):
-            for rep, cid in enumerate(selected, start=1):
+            atom_ids_u = _get_heavy_atom_ids(work)
+            kept: List[int] = []
+            kept_pre: List[int] = []
+            skipped_pre = 0
+            skipped_dups = 0
+
+            # Ensure a common reference frame for RMSD comparisons (only if we have >1).
+            # If we already aligned candidates earlier (oversample/diversity path), this is redundant but cheap.
+            if len(proposal) > 1:
+                ref_align = proposal[0]
+                _align_to_reference(work, proposal, ref_align, atom_ids_u)
+
+            # Pre-minimize pruning: if candidates are already within the diversity threshold,
+            # don't waste time doing a full minimization on near-duplicates.
+            if args.pre_min_unique_rmsd is not None:
+                pre_thr = float(args.pre_min_unique_rmsd)
+            else:
+                pre_thr = float(args.embed_prune_rms) if float(args.embed_prune_rms) > 0.0 else float(args.min_unique_rmsd)
+
+            for cid in proposal:
+                if len(kept) >= int(args.confs_per_grid):
+                    break
+
+                if kept_pre:
+                    min_r_pre = min(_rmsd_noalign(work, cid, kc, atom_ids=atom_ids_u) for kc in kept_pre)
+                    if min_r_pre < pre_thr:
+                        skipped_pre += 1
+                        continue
+                kept_pre.append(cid)
+
                 m_min, final_tors, mmff_e = set_torsions_and_minimize(
                     work,
                     torsions=tdefs,
@@ -839,6 +900,17 @@ def main(argv: Optional[List[str]] = None) -> int:
                     conf_id=cid,
                     allow_ring_torsions=args.allow_ring_torsions,
                 )
+
+                # Uniqueness filter: skip conformers too similar to ones already kept.
+                if kept:
+                    min_r = min(_rmsd_noalign(work, cid, kc, atom_ids=atom_ids_u) for kc in kept)
+                    if min_r < float(args.min_unique_rmsd):
+                        skipped_dups += 1
+                        continue
+
+                kept.append(cid)
+                rep = len(kept)
+
                 for i, (target, final) in enumerate(zip(angles, final_tors), start=1):
                     work.SetProp(f"torsion{i}_target_deg", f"{target:.3f}")
                     work.SetProp(f"torsion{i}_final_deg", f"{final:.3f}")
@@ -848,6 +920,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                 work.SetProp("rep_index", str(rep))
                 writer.write(work, confId=cid)
                 conf_counter += 1
+
+            if len(kept) < int(args.confs_per_grid):
+                print(
+                    f"WARNING: grid_index={grid_idx} saved {len(kept)}/{args.confs_per_grid} unique conformers "
+                    f"(pre-skip {skipped_pre} candidates with RMSD < {pre_thr:.3f} Å; "
+                    f"post-skip {skipped_dups} duplicates with RMSD < {args.min_unique_rmsd:.3f} Å)."
+                )
 
     writer.close()
     print(f"Wrote {conf_counter} minimized conformers to {out_path}")
