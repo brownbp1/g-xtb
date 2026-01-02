@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import List, Tuple, Optional
 
 from rdkit import Chem
-from rdkit.Chem import AllChem, rdMolTransforms
+from rdkit.Chem import AllChem, rdMolAlign, rdMolTransforms
 from rdkit.Geometry import Point3D
 
 
@@ -134,7 +134,7 @@ def set_torsions_and_minimize(
     torsion_force: float = 100.0,
     conf_id: int = 0,
     allow_ring_torsions: bool = False,
-) -> Tuple[Chem.Mol, List[float]]:
+) -> Tuple[Chem.Mol, List[float], Optional[float]]:
     """
     Take a molecule with a single conformer, set the torsions to target angles,
     minimize with MMFF94, and return:
@@ -178,6 +178,7 @@ def set_torsions_and_minimize(
 
     # Minimize with MMFF94s.
     props = AllChem.MMFFGetMoleculeProperties(m, mmffVariant="MMFF94s")
+    mmff_e: Optional[float] = None
     if props is not None:
         ff = AllChem.MMFFGetMoleculeForceField(m, props, confId=conf.GetId())
         if ff is not None:
@@ -199,6 +200,10 @@ def set_torsions_and_minimize(
                 )
             ff.Initialize()
             ff.Minimize(maxIts=mmff_max_iter)
+            try:
+                mmff_e = float(ff.CalcEnergy())
+            except Exception:
+                mmff_e = None
 
     # Measure final torsions.
     final_torsions: List[float] = []
@@ -206,7 +211,7 @@ def set_torsions_and_minimize(
         ang = rdMolTransforms.GetDihedralDeg(conf, td.a1, td.a2, td.a3, td.a4)
         final_torsions.append(ang)
 
-    return m, final_torsions
+    return m, final_torsions, mmff_e
 
 
 def _add_torsion_constraint(
@@ -295,6 +300,139 @@ def _embed_conformers_etkdg(
     return [int(x) for x in cids]
 
 
+def _embed_until_n(
+    mol: Chem.Mol,
+    n_target: int,
+    seed: int,
+    prune_rms: float,
+    num_threads: int,
+    max_attempts: int = 5,
+) -> List[int]:
+    """
+    Try to embed until we have at least n_target conformers.
+
+    Notes:
+    - RDKit's pruning (pruneRmsThresh) can aggressively collapse ensembles for large molecules.
+      If we get too few conformers, we progressively relax pruning down to 0.0.
+    """
+    conf_ids: List[int] = []
+    remaining = int(n_target)
+    attempt = 0
+    while remaining > 0 and attempt < max_attempts:
+        attempt += 1
+        # Relax pruning on subsequent attempts.
+        pr = float(prune_rms) if attempt == 1 else 0.0
+        # Vary seed across attempts (0 means nondeterministic, keep it 0).
+        this_seed = int(seed)
+        if this_seed != 0:
+            this_seed = this_seed + attempt
+        new_ids = _embed_conformers_etkdg(
+            mol,
+            n_confs=remaining,
+            seed=this_seed,
+            prune_rms=pr,
+            num_threads=num_threads,
+        )
+        conf_ids.extend(new_ids)
+        remaining = n_target - len(conf_ids)
+    return conf_ids
+
+
+def _get_heavy_atom_ids(mol: Chem.Mol) -> List[int]:
+    """Return atom indices for heavy atoms (atomic number > 1)."""
+    return [a.GetIdx() for a in mol.GetAtoms() if a.GetAtomicNum() > 1]
+
+
+def _conformer_rmsd(
+    mol: Chem.Mol, conf_id1: int, conf_id2: int, atom_ids: Optional[List[int]] = None
+) -> float:
+    """
+    Compute RMSD between two conformers of the same molecule.
+    Uses rdMolAlign.GetConformerRMS if available; falls back to AlignMol+RMS if needed.
+    """
+    # Preferred:
+    get_rms = getattr(rdMolAlign, "GetConformerRMS", None)
+    if get_rms is not None:
+        try:
+            return float(get_rms(mol, conf_id1, conf_id2, atomIds=atom_ids))
+        except TypeError:
+            # Older signature may not accept atomIds
+            return float(get_rms(mol, conf_id1, conf_id2))
+    # Fallback: copy and align
+    m1 = Chem.Mol(mol)
+    m2 = Chem.Mol(mol)
+    if atom_ids is None:
+        atom_ids = list(range(mol.GetNumAtoms()))
+    amap = [(i, i) for i in atom_ids]
+    rdMolAlign.AlignMol(m2, m1, prbCid=conf_id2, refCid=conf_id1, atomMap=amap)
+    # Now compute RMS in aligned coordinates
+    c1 = m1.GetConformer(conf_id1)
+    c2 = m2.GetConformer(conf_id2)
+    s = 0.0
+    for i in atom_ids:
+        p1 = c1.GetAtomPosition(i)
+        p2 = c2.GetAtomPosition(i)
+        dx = p1.x - p2.x
+        dy = p1.y - p2.y
+        dz = p1.z - p2.z
+        s += dx * dx + dy * dy + dz * dz
+    return math.sqrt(s / float(len(atom_ids)))
+
+
+def _select_diverse_subset(
+    mol: Chem.Mol,
+    conf_ids: List[int],
+    energies: List[Optional[float]],
+    k: int,
+    atom_ids: Optional[List[int]] = None,
+) -> List[int]:
+    """
+    Select k diverse conformers from conf_ids using greedy farthest-point sampling.
+
+    Seed: lowest MMFF energy (if available), otherwise the first conformer.
+    Criterion: maximize the minimum RMSD to the selected set (heavy-atom RMSD by default).
+    """
+    if k <= 0:
+        return []
+    if len(conf_ids) <= k:
+        return list(conf_ids)
+    if atom_ids is None:
+        atom_ids = _get_heavy_atom_ids(mol)
+
+    # Seed selection with lowest-energy conformer (ignore None energies).
+    best_idx = 0
+    best_e = None
+    for i, e in enumerate(energies):
+        if e is None:
+            continue
+        if best_e is None or e < best_e:
+            best_e = e
+            best_idx = i
+    selected = [conf_ids[best_idx]]
+    remaining = [cid for cid in conf_ids if cid != selected[0]]
+
+    # Greedy farthest-point: repeatedly add the conformer that maximizes its distance
+    # to the current selected set (distance = min RMSD to selected).
+    while len(selected) < k and remaining:
+        best_cid = None
+        best_min_dist = -1.0
+        for cid in remaining:
+            min_d = float("inf")
+            for s_cid in selected:
+                d = _conformer_rmsd(mol, s_cid, cid, atom_ids=atom_ids)
+                if d < min_d:
+                    min_d = d
+            if min_d > best_min_dist:
+                best_min_dist = min_d
+                best_cid = cid
+        if best_cid is None:
+            break
+        selected.append(best_cid)
+        remaining.remove(best_cid)
+
+    return selected
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
@@ -358,14 +496,34 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--embed-prune-rms",
         type=float,
-        default=0.25,
-        help="Prune threshold (Å) used by ETKDG embedding to enforce diversity. [default: %(default)s]",
+        default=0.0,
+        help=(
+            "Prune threshold (Å) used by ETKDG embedding to enforce diversity. "
+            "Set to 0.0 to disable pruning (recommended if you want exactly "
+            "--confs-per-grid conformers). [default: %(default)s]"
+        ),
     )
     parser.add_argument(
         "--embed-seed",
         type=int,
         default=0,
         help="Random seed for ETKDG embedding. Use 0 for nondeterministic. [default: %(default)s]",
+    )
+    parser.add_argument(
+        "--embed-oversample",
+        type=int,
+        default=1,
+        help="Oversampling factor for ETKDG candidate conformers per grid point. "
+             "The script will embed (confs_per_grid * embed_oversample) candidates, "
+             "minimize them with torsion restraints, then select a diverse subset of "
+             "size confs_per_grid. [default: %(default)s]",
+    )
+    parser.add_argument(
+        "--embed-max-candidates",
+        type=int,
+        default=200,
+        help="Safety limit: maximum number of ETKDG candidate conformers per grid point "
+             "(after applying oversampling). [default: %(default)s]",
     )
     parser.add_argument(
         "--embed-threads",
@@ -488,17 +646,32 @@ def main(argv: Optional[List[str]] = None) -> int:
             conf_ids = [0]
         else:
             if args.ensemble_method == "etkdg":
-                conf_ids = _embed_conformers_etkdg(
+                n_target = int(args.confs_per_grid)
+                oversample = max(1, int(args.embed_oversample))
+                n_cand = n_target * oversample
+                if n_cand > int(args.embed_max_candidates):
+                    raise SystemExit(
+                        f"ERROR: requested {n_cand} ETKDG candidates per grid point "
+                        f"({n_target} * oversample {oversample}) exceeds --embed-max-candidates={args.embed_max_candidates}. "
+                        "Reduce --embed-oversample or increase --embed-max-candidates."
+                    )
+
+                conf_ids = _embed_until_n(
                     work,
-                    n_confs=args.confs_per_grid,
-                    seed=args.embed_seed,
-                    prune_rms=args.embed_prune_rms,
-                    num_threads=args.embed_threads,
+                    n_target=n_cand,
+                    seed=int(args.embed_seed),
+                    prune_rms=float(args.embed_prune_rms),
+                    num_threads=int(args.embed_threads),
                 )
                 if not conf_ids:
                     raise SystemExit(
                         f"ERROR: ETKDG embedding failed at grid_index={grid_idx}. "
                         "Try increasing --embed-seed, reducing --embed-prune-rms, or using --ensemble-method jitter."
+                    )
+                if len(conf_ids) < n_cand:
+                    print(
+                        f"WARNING: only embedded {len(conf_ids)}/{n_cand} candidates at grid_index={grid_idx}. "
+                        "Consider --embed-prune-rms 0.0, increasing --embed-seed, or using --ensemble-method jitter.",
                     )
             else:
                 # Jitter method: create conformers by copying the reference and jittering.
@@ -509,11 +682,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                     conf_ids.append(work.GetNumConformers() - 1)
 
         # For each conformer, set torsions + minimize with constraints.
-        for rep, cid in enumerate(conf_ids, start=1):
+        # We may oversample candidates; later we'll select a diverse subset to write.
+        cand_ids: List[int] = list(conf_ids)
+        cand_energies: List[Optional[float]] = []
+        cand_final_tors: List[List[float]] = []
+        for cid in cand_ids:
             coord_jitter = 0.0
             if args.confs_per_grid > 1 and args.ensemble_method == "jitter":
                 coord_jitter = args.coord_jitter
-            m_min, final_tors = set_torsions_and_minimize(
+            m_min, final_tors, mmff_e = set_torsions_and_minimize(
                 work,
                 torsions=tdefs,
                 angles=angles,
@@ -524,13 +701,36 @@ def main(argv: Optional[List[str]] = None) -> int:
                 conf_id=cid,
                 allow_ring_torsions=args.allow_ring_torsions,
             )
-            # Annotate SD properties on the molecule, then write the specific conformer.
+            cand_energies.append(mmff_e)
+            cand_final_tors.append(final_tors)
+
+        # Choose which conformers to write for this grid point.
+        if args.ensemble_method == "etkdg" and args.confs_per_grid > 1 and int(args.embed_oversample) > 1:
+            selected = _select_diverse_subset(
+                work,
+                cand_ids,
+                cand_energies,
+                k=int(args.confs_per_grid),
+                atom_ids=_get_heavy_atom_ids(work),
+            )
+        else:
+            selected = cand_ids[: int(args.confs_per_grid)]
+
+        # Write selected conformers (one SDF record per conformer).
+        for rep, cid in enumerate(selected, start=1):
+            # Find candidate index to fetch final torsions/energy.
+            idx_c = cand_ids.index(cid)
+            final_tors = cand_final_tors[idx_c]
+            mmff_e = cand_energies[idx_c]
+
             for i, (target, final) in enumerate(zip(angles, final_tors), start=1):
-                m_min.SetProp(f"torsion{i}_target_deg", f"{target:.3f}")
-                m_min.SetProp(f"torsion{i}_final_deg", f"{final:.3f}")
-            m_min.SetProp("grid_index", str(grid_idx))
-            m_min.SetProp("rep_index", str(rep))
-            writer.write(m_min, confId=cid)
+                work.SetProp(f"torsion{i}_target_deg", f"{target:.3f}")
+                work.SetProp(f"torsion{i}_final_deg", f"{final:.3f}")
+            if mmff_e is not None:
+                work.SetProp("mmff94s_energy", f"{mmff_e:.8f}")
+            work.SetProp("grid_index", str(grid_idx))
+            work.SetProp("rep_index", str(rep))
+            writer.write(work, confId=cid)
             conf_counter += 1
 
     writer.close()
